@@ -1,5 +1,5 @@
 all:
-	dmd tg.d tdjson.d tdlog.d ./lib/libeventcore.a ./lib/libstdx-allocator.a -L./lib/libtdjson.so -L./lib/libvibe_core.so -L./lib/libvibe_http.so -L./lib/libvibe_stream.so -L./lib/libvibe_crypto.so -L./lib/libvibe_utils.so -L./lib/libvibe_inet.so -L./lib/libvibe_data.so -L./lib/libvibe_tls.so -L./lib/libvibe_textfilter.so -L./lib/libvibe_internal.so -L./lib/libevent-2.1.so.5 -Iinclude -L-rpath=./lib -L-s -version=Have_vibe_core -version=VibeLibeventDriver
+	dmd tg.d tdjson.d tdlog.d  ./lib/libstdx-allocator.a -L./lib/libtdjson.so -L./lib/libvibe_core.so -L./lib/libvibe_http.so -L./lib/libvibe_stream.so -L./lib/libvibe_crypto.so -L./lib/libvibe_utils.so -L./lib/libvibe_inet.so -L./lib/libvibe_data.so -L./lib/libvibe_tls.so -L./lib/libvibe_textfilter.so -L./lib/libvibe_internal.so -L./lib/libevent-2.1.so.5 -Iinclude -L-rpath=./lib -L-s -version=Have_vibe_core -version=VibeLibeventDriver
 
 mac:
 	
