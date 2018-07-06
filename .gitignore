@@ -1,0 +1,6 @@
+data/
+config.json
+*.o
+tg
+*.log
+.DS_Store

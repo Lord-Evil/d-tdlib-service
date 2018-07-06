@@ -1,0 +1,11 @@
+{
+	"use_message_database" : true,
+	"use_secret_chats" : true,
+	"api_id" : <api_id>,
+	"api_hash" : "<api_hash>",
+	"system_language_code" : "en",
+	"device_model" : "<device_model>",
+	"system_version" : "<system_version>",
+	"application_version" : "1.0",
+	"enable_storage_optimizer" : true
+}
