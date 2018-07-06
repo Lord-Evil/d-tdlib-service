@@ -5,8 +5,6 @@ import std.stdio;
 import std.conv: to;
 import std.file;
 
-import vibe.core.core;
-
 class TDClient
 {
 private:
@@ -42,16 +40,7 @@ public:
 				if(event==null){
 					//writeln("NOTHING");
 				}else{
-					if(isAuthorized){
-						writeln(1);
-						auto t=runTask({
-							writeln(2);
-							processEvent(event);
-						});
-						t.join();
-					}
-					else
-						processEvent(event);
+					processEvent(event);
 				}
 			}catch(Throwable ex){
 				writeln("--------ERROR------");
@@ -59,7 +48,6 @@ public:
 				writeln(ex);
 			}
 		}
-		exitEventLoop(true);
 	}
 	void processEvent(string event){
 		JSONValue ev = parseJSON(event);
