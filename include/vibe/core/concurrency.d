@@ -4,13 +4,11 @@
 	This module is modeled after std.concurrency, but provides a fiber-aware alternative
 	to it. All blocking operations will yield the calling fiber instead of blocking it.
 
-	Copyright: © 2013-2014 RejectedSoftware e.K.
+	Copyright: © 2013-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
 module vibe.core.concurrency;
-
-public import std.concurrency;
 
 import core.time;
 import std.traits;
@@ -19,7 +17,10 @@ import std.typetuple;
 import std.variant;
 import std.string;
 import vibe.core.task;
+import vibe.internal.allocator;
+import vibe.internal.meta.traits : StripHeadConst;
 
+public import std.concurrency;
 
 private extern (C) pure nothrow void _d_monitorenter(Object h);
 private extern (C) pure nothrow void _d_monitorexit(Object h);
@@ -37,14 +38,8 @@ pure nothrow @safe {
 	return ScopedLock!T(object);
 }
 /// ditto
-void lock(T : const(Object))(shared(T) object, scope void delegate(scope T) nothrow accessor)
-nothrow {
-	auto l = lock(object);
-	accessor(l.unsafeGet());
-}
-/// ditto
 void lock(T : const(Object))(shared(T) object, scope void delegate(scope T) accessor)
-{
+nothrow {
 	auto l = lock(object);
 	accessor(l.unsafeGet());
 }
@@ -250,12 +245,12 @@ unittest {
 	import vibe.core.concurrency;
 	import vibe.core.core;
 
-	static void compute(Tid tid, Isolated!(double[]) array, size_t start_index)
+	static void compute(Task tid, Isolated!(double[]) array, size_t start_index)
 	{
 		foreach( i; 0 .. array.length )
 			array[i] = (start_index + i) * 0.5;
 
-		//send(tid, array.move()); // Isolated!T isn't recognized by std.concurrency
+		sendCompat(tid, array.move());
 	}
 
 	void test()
@@ -270,14 +265,14 @@ unittest {
 		Isolated!(double[])[] subarrays = arr.splice(indices);
 
 		// start processing in threads
-		Tid[] tids;
+		Task[] tids;
 		foreach (i, idx; indices)
-			tids ~= runWorkerTaskH(&compute, thisTid, subarrays[i].move(), idx).tid;
+			tids ~= runWorkerTaskH(&compute, Task.getThis(), subarrays[i].move(), idx);
 
 		// collect results
 		auto resultarrays = new Isolated!(double[])[tids.length];
-		//foreach( i, tid; tids )
-		//	resultarrays[i] = receiveOnly!(Isolated!(double[])).move(); // Isolated!T isn't recognized by std.concurrency
+		foreach( i, tid; tids )
+			resultarrays[i] = receiveOnlyCompat!(Isolated!(double[])).move();
 
 		// BUG: the arrays must be sorted here, but since there is no way to tell
 		// from where something was received, this is difficult here.
@@ -690,7 +685,7 @@ private struct ScopedRefAssociativeArray(K, V)
 /// private
 private string isolatedAggregateMethodsString(T)()
 {
-	import vibe.internal.traits;
+	import vibe.internal.meta.traits;
 
 	string ret = generateModuleImports!T();
 	//pragma(msg, "Type '"~T.stringof~"'");
@@ -955,7 +950,7 @@ template haveTypeAlready(T, TYPES...)
 	Determines if the given list of types has any non-immutable aliasing outside of their object tree.
 
 	The types in particular may only contain plain data, pointers or arrays to immutable data, or references
-	encapsulated in stdx.typecons.Isolated.
+	encapsulated in `vibe.core.concurrency.Isolated`.
 */
 template isStronglyIsolated(T...)
 {
@@ -982,7 +977,7 @@ template isStronglyIsolated(T...)
 	Determines if the given list of types has any non-immutable and unshared aliasing outside of their object tree.
 
 	The types in particular may only contain plain data, pointers or arrays to immutable or shared data, or references
-	encapsulated in stdx.typecons.Isolated. Values that do not have unshared and unisolated aliasing are safe to be passed
+	encapsulated in `vibe.core.concurrency.Isolated`. Values that do not have unshared and unisolated aliasing are safe to be passed
 	between threads.
 */
 template isWeaklyIsolated(T...)
@@ -992,8 +987,8 @@ template isWeaklyIsolated(T...)
 	else {
 		static if(is(T[0] == immutable)) enum bool isWeaklyIsolated = true;
 		else static if (is(T[0] == shared)) enum bool isWeaklyIsolated = true;
-		else static if (is(T[0] == Tid)) enum bool isWeaklyIsolated = true;
 		else static if (isInstanceOf!(Rebindable, T[0])) enum bool isWeaklyIsolated = isWeaklyIsolated!(typeof(T[0].get()));
+		else static if (is(T[0] == Tid)) enum bool isWeaklyIsolated = true; // Tid/MessageBox is not properly annotated with shared
 		else static if (is(T[0] : Throwable)) enum bool isWeaklyIsolated = true; // WARNING: this is unsafe, but needed for send/receive!
 		else static if (is(typeof(T[0].__isIsolatedType))) enum bool isWeaklyIsolated = true;
 		else static if (is(typeof(T[0].__isWeakIsolatedType))) enum bool isWeaklyIsolated = true;
@@ -1062,6 +1057,10 @@ unittest {
 	static assert(!isWeaklyIsolated!I);
 }
 
+unittest {
+	static assert(isWeaklyIsolated!Tid);
+}
+
 
 template isCopyable(T)
 {
@@ -1118,9 +1117,8 @@ struct Future(T) {
 	Starts an asynchronous computation and returns a future for the result value.
 
 	If the supplied callable and arguments are all weakly isolated,
-	$(D vibe.core.core.runWorkerTask) will be used to perform the computation in
-	a separate worker thread. Otherwise, $(D vibe.core.core.runTask) will be
-	used and the result is computed within a separate task within the calling thread.
+	$(D vibe.core.core.runWorkerTask) will be used to perform the computation.
+	Otherwise, $(D vibe.core.core.runTask) will be used.
 
 	Params:
 		callable: A callable value, can be either a function, a delegate, or a
@@ -1132,18 +1130,19 @@ struct Future(T) {
 
 	See_also: $(D isWeaklyIsolated)
 */
-Future!(ReturnType!CALLABLE) async(CALLABLE, ARGS...)(CALLABLE callable, ARGS args)
+Future!(StripHeadConst!(ReturnType!CALLABLE)) async(CALLABLE, ARGS...)(CALLABLE callable, ARGS args)
 	if (is(typeof(callable(args)) == ReturnType!CALLABLE))
 {
-	import vibe.core.core;
 	import vibe.internal.freelistref : FreeListRef;
+
+	import vibe.core.core;
 	import std.functional : toDelegate;
 
-	alias RET = ReturnType!CALLABLE;
+	alias RET = StripHeadConst!(ReturnType!CALLABLE);
 	Future!RET ret;
 	ret.init();
 	static void compute(FreeListRef!(shared(RET)) dst, CALLABLE callable, ARGS args) {
-		dst.get = cast(shared(RET))callable(args);
+		dst = cast(shared(RET))callable(args);
 	}
 	static if (isWeaklyIsolated!CALLABLE && isWeaklyIsolated!ARGS) {
 		ret.m_task = runWorkerTaskH(&compute, ret.m_result, callable, args);
@@ -1160,7 +1159,6 @@ unittest {
 
 	void test()
 	{
-		static if (__VERSION__ >= 2065) {
 		auto val = async({
 			logInfo("Starting to compute value in worker task.");
 			sleep(500.msecs); // simulate some lengthy computation
@@ -1172,7 +1170,6 @@ unittest {
 		sleep(200.msecs); // simulate some lengthy computation
 		logInfo("Finished computation in main task. Waiting for async value.");
 		logInfo("Result: %s", val.getResult());
-		}
 	}
 }
 
@@ -1199,8 +1196,29 @@ unittest {
 	}
 }
 
+unittest {
+	import vibe.core.core : sleep;
+
+	auto f = async({
+		immutable byte b = 1;
+		return b;
+	});
+	sleep(10.msecs); // let it finish first
+	assert(f.getResult() == 1);
+
+	// currently not possible because Task.join only works within a single thread.
+	/*f = async({
+		immutable byte b = 2;
+		sleep(10.msecs); // let the caller wait a little
+		return b;
+	});
+	assert(f.getResult() == 1);*/
+}
+
+/******************************************************************************/
 /******************************************************************************/
 /* std.concurrency compatible interface for message passing                   */
+/******************************************************************************/
 /******************************************************************************/
 
 enum ConcurrencyPrimitive {
@@ -1220,19 +1238,21 @@ void setConcurrencyPrimitive(ConcurrencyPrimitive primitive)
 	atomicStore(st_concurrencyPrimitive, primitive);
 }
 
-void send(ARGS...)(Task task, ARGS args) { std.concurrency.send(task.tid, args); }
+private shared ConcurrencyPrimitive st_concurrencyPrimitive = ConcurrencyPrimitive.thread;
+
+void send(ARGS...)(Task task, ARGS args) { std.concurrency.send(task.tidInfo.ident, args); }
 void send(ARGS...)(Tid tid, ARGS args) { std.concurrency.send(tid, args); }
-void prioritySend(ARGS...)(Task task, ARGS args) { std.concurrency.prioritySend(task.tid, args); }
+void prioritySend(ARGS...)(Task task, ARGS args) { std.concurrency.prioritySend(task.tidInfo.ident, args); }
 void prioritySend(ARGS...)(Tid tid, ARGS args) { std.concurrency.prioritySend(tid, args); }
 
-
-package final class VibedScheduler : Scheduler {
+package class VibedScheduler : Scheduler {
 	import core.sync.mutex;
 	import vibe.core.core;
 	import vibe.core.sync;
 
 	override void start(void delegate() op) { op(); }
-	override void spawn(void delegate() op) {
+	override void spawn(void delegate() op)
+	{
 		import core.thread : Thread;
 
 		final switch (st_concurrencyPrimitive) with (ConcurrencyPrimitive) {
@@ -1250,13 +1270,203 @@ package final class VibedScheduler : Scheduler {
 		}
 	}
 	override void yield() {}
-	override @property ref ThreadInfo thisInfo() @trusted { return Task.getThis().tidInfo; }
+	override @property ref ThreadInfo thisInfo() { return Task.getThis().tidInfo; }
 	override TaskCondition newCondition(Mutex m)
 	{
-		try {
-			return new TaskCondition(m);
-			} catch(Exception e) { assert(false, e.msg); }
+		scope (failure) assert(false);
+		version (VibeLibasyncDriver) {
+			import vibe.core.drivers.libasync;
+			if (LibasyncDriver.isControlThread)
+				return null;
+		}
+		setupDriver();
+		return new TaskCondition(m);
 	}
 }
 
-private shared ConcurrencyPrimitive st_concurrencyPrimitive = ConcurrencyPrimitive.thread;
+
+// Compatibility implementation of `send` using vibe.d's own std.concurrency implementation
+void sendCompat(ARGS...)(Task tid, ARGS args)
+{
+	assert (tid != Task(), "Invalid task handle");
+	static assert(args.length > 0, "Need to send at least one value.");
+	foreach(A; ARGS){
+		static assert(isWeaklyIsolated!A, "Only objects with no unshared or unisolated aliasing may be sent, not "~A.stringof~".");
+	}
+	tid.messageQueue.send(Variant(IsolatedValueProxyTuple!ARGS(args)));
+}
+
+// Compatibility implementation of `prioritySend` using vibe.d's own std.concurrency implementation
+void prioritySendCompat(ARGS...)(Task tid, ARGS args)
+{
+	assert (tid != Task(), "Invalid task handle");
+	static assert(args.length > 0, "Need to send at least one value.");
+	foreach(A; ARGS){
+		static assert(isWeaklyIsolated!A, "Only objects with no unshared or unisolated aliasing may be sent, not "~A.stringof~".");
+	}
+	tid.messageQueue.prioritySend(Variant(IsolatedValueProxyTuple!ARGS(args)));
+}
+
+// TODO: handle special exception types
+
+// Compatibility implementation of `receive` using vibe.d's own std.concurrency implementation
+void receiveCompat(OPS...)(OPS ops)
+{
+	auto tid = Task.getThis();
+	assert(tid != Task.init, "Cannot receive task messages outside of a task.");
+	tid.messageQueue.receive(opsFilter(ops), opsHandler(ops));
+}
+
+// Compatibility implementation of `receiveOnly` using vibe.d's own std.concurrency implementation
+auto receiveOnlyCompat(ARGS...)()
+{
+	import std.algorithm : move;
+	ARGS ret;
+
+	receiveCompat(
+		(ARGS val) { move(val, ret); },
+		(LinkTerminated e) { throw e; },
+		(OwnerTerminated e) { throw e; },
+		(Variant val) { throw new MessageMismatch(format("Unexpected message type %s, expected %s.", val.type, ARGS.stringof)); }
+	);
+
+	static if(ARGS.length == 1) return ret[0];
+	else return tuple(ret);
+}
+
+// Compatibility implementation of `receiveTimeout` using vibe.d's own std.concurrency implementation
+bool receiveTimeoutCompat(OPS...)(Duration timeout, OPS ops)
+{
+	auto tid = Task.getThis();
+	assert(tid != Task.init, "Cannot receive task messages outside of a task.");
+	return tid.messageQueue.receiveTimeout!OPS(timeout, opsFilter(ops), opsHandler(ops));
+}
+
+// Compatibility implementation of `setMailboxSize` using vibe.d's own std.concurrency implementation
+void setMaxMailboxSizeCompat(Task tid, size_t messages, OnCrowding on_crowding)
+{
+	final switch(on_crowding){
+		case OnCrowding.block: setMaxMailboxSizeCompat(tid, messages, null); break;
+		case OnCrowding.throwException: setMaxMailboxSizeCompat(tid, messages, &onCrowdingThrow); break;
+		case OnCrowding.ignore: setMaxMailboxSizeCompat(tid, messages, &onCrowdingDrop); break;
+	}
+}
+
+// Compatibility implementation of `setMailboxSize` using vibe.d's own std.concurrency implementation
+void setMaxMailboxSizeCompat(Task tid, size_t messages, bool function(Task) on_crowding)
+{
+	tid.messageQueue.setMaxSize(messages, on_crowding);
+}
+
+unittest {
+	static class CLS {}
+	static assert(is(typeof(sendCompat(Task.init, makeIsolated!CLS()))));
+	static assert(is(typeof(sendCompat(Task.init, 1))));
+	static assert(is(typeof(sendCompat(Task.init, 1, "str", makeIsolated!CLS()))));
+	static assert(!is(typeof(sendCompat(Task.init, new CLS))));
+	static assert(is(typeof(receiveCompat((Isolated!CLS){}))));
+	static assert(is(typeof(receiveCompat((int){}))));
+	static assert(is(typeof(receiveCompat!(void delegate(int, string, Isolated!CLS))((int, string, Isolated!CLS){}))));
+	static assert(!is(typeof(receiveCompat((CLS){}))));
+}
+
+private bool onCrowdingThrow(Task tid){
+	import std.concurrency : Tid;
+	throw new MailboxFull(Tid());
+}
+
+private bool onCrowdingDrop(Task tid){
+	return false;
+}
+
+private struct IsolatedValueProxyTuple(T...)
+{
+	staticMap!(IsolatedValueProxy, T) fields;
+
+	this(ref T values)
+	{
+		foreach (i, Ti; T) {
+			static if (isInstanceOf!(IsolatedSendProxy, IsolatedValueProxy!Ti)) {
+				fields[i] = IsolatedValueProxy!Ti(values[i].unsafeGet());
+			} else fields[i] = values[i];
+		}
+	}
+}
+
+private template IsolatedValueProxy(T)
+{
+	static if (isInstanceOf!(IsolatedRef, T) || isInstanceOf!(IsolatedArray, T) || isInstanceOf!(IsolatedAssociativeArray, T)) {
+		alias IsolatedValueProxy = IsolatedSendProxy!(T.BaseType);
+	} else {
+		alias IsolatedValueProxy = T;
+	}
+}
+
+/+unittest {
+	static class Test {}
+	void test() {
+		Task.getThis().send(new immutable Test, makeIsolated!Test());
+	}
+}+/
+
+private struct IsolatedSendProxy(T) { alias BaseType = T; T value; }
+
+private bool callBool(F, T...)(F fnc, T args)
+{
+	static string caller(string prefix)
+	{
+		import std.conv;
+		string ret = prefix ~ "fnc(";
+		foreach (i, Ti; T) {
+			static if (i > 0) ret ~= ", ";
+			static if (isInstanceOf!(IsolatedSendProxy, Ti)) ret ~= "assumeIsolated(args["~to!string(i)~"].value)";
+			else ret ~= "args["~to!string(i)~"]";
+		}
+		ret ~= ");";
+		return ret;
+	}
+	static assert(is(ReturnType!F == bool) || is(ReturnType!F == void),
+		"Message handlers must return either bool or void.");
+	static if (is(ReturnType!F == bool)) mixin(caller("return "));
+	else {
+		mixin(caller(""));
+		return true;
+	}
+}
+
+private bool delegate(Variant) @safe opsFilter(OPS...)(OPS ops)
+{
+	return (Variant msg) @trusted { // Variant
+		if (msg.convertsTo!Throwable) return true;
+		foreach (i, OP; OPS)
+			if (matchesHandler!OP(msg))
+				return true;
+		return false;
+	};
+}
+
+private void delegate(Variant) @safe opsHandler(OPS...)(OPS ops)
+{
+	return (Variant msg) @trusted  { // Variant
+		foreach (i, OP; OPS) {
+			alias PTypes = ParameterTypeTuple!OP;
+			if (matchesHandler!OP(msg)) {
+				static if (PTypes.length == 1 && is(PTypes[0] == Variant)) {
+					if (callBool(ops[i], msg)) return; // WARNING: proxied isolated values will go through verbatim!
+				} else {
+					auto msgt = msg.get!(IsolatedValueProxyTuple!PTypes);
+					if (callBool(ops[i], msgt.fields)) return;
+				}
+			}
+		}
+		if (msg.convertsTo!Throwable)
+			throw msg.get!Throwable();
+	};
+}
+
+private bool matchesHandler(F)(Variant msg)
+{
+	alias PARAMS = ParameterTypeTuple!F;
+	if (PARAMS.length == 1 && is(PARAMS[0] == Variant)) return true;
+	else return msg.convertsTo!(IsolatedValueProxyTuple!PARAMS);
+}

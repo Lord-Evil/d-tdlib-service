@@ -20,7 +20,6 @@ import core.atomic;
 import core.thread;
 
 import std.traits : isSomeString;
-import std.range.primitives : isInputRange, isOutputRange;
 
 /**
 	Sets the minimum log level to be printed using the default console logger.
@@ -115,28 +114,37 @@ nothrow {
 		args = Any input values needed for formatting
 */
 void log(LogLevel level, /*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args)
-	nothrow if (isSomeString!S && level != LogLevel.none)
+	nothrow if (isSomeString!S)
 {
-	doLog(level, null, null, file, line, fmt, args);
+	static assert(level != LogLevel.none);
+	try {
+		foreach (l; getLoggers())
+			if (l.minLevel <= level) { // WARNING: TYPE SYSTEM HOLE: accessing field of shared class!
+				auto ll = l.lock();
+				auto rng = LogOutputRange(ll, file, line, level);
+				/*() @trusted {*/ rng.formattedWrite(fmt, args); //} (); // formattedWrite is not @safe at least up to 2.068.0
+				rng.finalize();
+			}
+	} catch(Exception e) debug assert(false, e.msg);
 }
 /// ditto
-void logTrace(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.trace, null, null/*, mod, func*/, file, line, fmt, args); }
+void logTrace(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.trace/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logDebugV(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.debugV, null, null/*, mod, func*/, file, line, fmt, args); }
+void logDebugV(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.debugV/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logDebug(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.debug_, null, null/*, mod, func*/, file, line, fmt, args); }
+void logDebug(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.debug_/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logDiagnostic(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.diagnostic, null, null/*, mod, func*/, file, line, fmt, args); }
+void logDiagnostic(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.diagnostic/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logInfo(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.info, null, null/*, mod, func*/, file, line, fmt, args); }
+void logInfo(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.info/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logWarn(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.warn, null, null/*, mod, func*/, file, line, fmt, args); }
+void logWarn(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.warn/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logError(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.error, null, null/*, mod, func*/, file, line, fmt, args); }
+void logError(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.error/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logCritical(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.critical, null, null/*, mod, func*/, file, line, fmt, args); }
+void logCritical(/*string mod = __MODULE__, string func = __FUNCTION__,*/ string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.critical/*, mod, func*/, file, line)(fmt, args); }
 /// ditto
-void logFatal(string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { doLog(LogLevel.fatal, null, null, file, line, fmt, args); }
+void logFatal(string file = __FILE__, int line = __LINE__, S, T...)(S fmt, lazy T args) nothrow { log!(LogLevel.fatal, file, line)(fmt, args); }
 
 ///
 @safe unittest {
@@ -249,13 +257,7 @@ final class FileLogger : Logger {
 	}
 
 	Format format = Format.thread;
-	Format infoFormat = Format.thread;
-
-	/** Use escape sequences to color log output.
-
-		Note that the terminal must support 256-bit color codes.
-	*/
-	bool useColors = false;
+	Format infoFormat = Format.plain;
 
 	this(File info_file, File diag_file)
 	{
@@ -265,8 +267,8 @@ final class FileLogger : Logger {
 
 	this(string filename)
 	{
-		auto f = File(filename, "ab");
-		this(f, f);
+		m_infoFile = File(filename, "ab");
+		m_diagFile = m_infoFile;
 	}
 
 	override void beginLine(ref LogLine msg)
@@ -288,71 +290,29 @@ final class FileLogger : Logger {
 
 		auto fmt = (m_curFile is m_diagFile) ? this.format : this.infoFormat;
 
-		auto dst = m_curFile.lockingTextWriter;
-
-		if (this.useColors) {
-			version (Posix) {
-				final switch (msg.level) {
-					case LogLevel.trace: dst.put("\x1b[49;38;5;243m"); break;
-					case LogLevel.debugV: dst.put("\x1b[49;38;5;245m"); break;
-					case LogLevel.debug_: dst.put("\x1b[49;38;5;180m"); break;
-					case LogLevel.diagnostic: dst.put("\x1b[49;38;5;143m"); break;
-					case LogLevel.info: dst.put("\x1b[49;38;5;29m"); break;
-					case LogLevel.warn: dst.put("\x1b[49;38;5;220m"); break;
-					case LogLevel.error: dst.put("\x1b[49;38;5;9m"); break;
-					case LogLevel.critical: dst.put("\x1b[41;38;5;15m"); break;
-					case LogLevel.fatal: dst.put("\x1b[48;5;9;30m"); break;
-					case LogLevel.none: assert(false);
-				}
-			}
-		}
-
 		final switch (fmt) {
 			case Format.plain: break;
-			case Format.thread:
-				dst.put('[');
-				if (msg.threadName.length) dst.put(msg.threadName);
-				else dst.formattedWrite("%08X", msg.threadID);
-				dst.put('(');
-				import vibe.core.task : Task;
-				Task.getThis().getDebugID(dst);
-				dst.formattedWrite(") %s] ", pref);
-				break;
+			case Format.thread: m_curFile.writef("[%08X:%08X %s] ", msg.threadID, msg.fiberID, pref); break;
 			case Format.threadTime:
-				dst.put('[');
 				auto tm = msg.time;
-				static if (is(typeof(tm.fracSecs))) auto msecs = tm.fracSecs.total!"msecs"; // 2.069 has deprecated "fracSec"
+				static if (is(typeof(tm.fracSecs))) auto msecs = tm.fracSecs.total!"msecs";
 				else auto msecs = tm.fracSec.msecs;
-				m_curFile.writef("%d-%02d-%02d %02d:%02d:%02d.%03d ", tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second, msecs);
-
-				if (msg.threadName.length) dst.put(msg.threadName);
-				else dst.formattedWrite("%08X", msg.threadID);
-				dst.put('(');
-				import vibe.core.task : Task;
-				Task.getThis().getDebugID(dst);
-				dst.formattedWrite(") %s] ", pref);
+				m_curFile.writef("[%08X:%08X %d.%02d.%02d %02d:%02d:%02d.%03d %s] ",
+					msg.threadID, msg.fiberID,
+					tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second, msecs,
+					pref);
 				break;
 		}
 	}
 
 	override void put(scope const(char)[] text)
 	{
-		static if (__VERSION__ <= 2066)
-			() @trusted { m_curFile.write(text); } ();
-		else m_curFile.write(text);
+		m_curFile.write(text);
 	}
 
 	override void endLine()
 	{
-		if (useColors) {
-			version (Posix) {
-				m_curFile.write("\x1b[0m");
-			}
-		}
-
-		static if (__VERSION__ <= 2066)
-			() @trusted { m_curFile.writeln(); } ();
-		else m_curFile.writeln();
+		m_curFile.writeln();
 		m_curFile.flush();
 	}
 }
@@ -401,8 +361,6 @@ final class HTMLLogger : Logger {
 		m_logFile.writef(`<div class="timeStamp">%s</div>`, msg.time.toISOExtString());
 		if (msg.thread)
 			m_logFile.writef(`<div class="threadName">%s</div>`, msg.thread.name);
-		if (msg.fiber)
-			m_logFile.writef(`<div class="taskID">%s</div>`, msg.fiberID);
 		m_logFile.write(`<div class="message">`);
 	}
 
@@ -465,16 +423,10 @@ final class HTMLLogger : Logger {
 			left: 150pt;
 			width: 100pt;
 		}
-		div.taskID {
-			position: absolute;
-			top: 0pt;
-			left: 250pt;
-			width: 70pt;
-		}
 		div.message {
 			position: relative;
 			top: 0pt;
-			left: 320pt;
+			left: 250pt;
 		}
 		body {
 			font-family: Tahoma, Arial, sans-serif;
@@ -546,7 +498,6 @@ final class HTMLLogger : Logger {
 	}
 }
 
-
 import std.conv;
 /**
 	A logger that logs in syslog format according to RFC 5424.
@@ -556,7 +507,8 @@ import std.conv;
 
 	Standards: Conforms to RFC 5424.
 */
-final class SyslogLogger(OutputStream) : Logger {
+final class SyslogLogger : Logger {
+	import vibe.core.stream;
 	private {
 		string m_hostName;
 		string m_appName;
@@ -672,11 +624,11 @@ final class SyslogLogger(OutputStream) : Logger {
 
 		auto text = msg.text;
 		import std.format : formattedWrite;
-		import vibe.stream.wrapper : StreamOutputRange;
-		auto str = StreamOutputRange(m_ostream);
+		auto str = appender!string(); // FIXME: avoid GC allocation
 		(&str).formattedWrite(SYSLOG_MESSAGE_FORMAT_VERSION1, priVal,
 			timestamp, m_hostName, BOM ~ m_appName, procId, msgId,
 			structuredData, BOM);
+		m_ostream.write(str.data);
 	}
 
 	override void put(scope const(char)[] text)
@@ -734,6 +686,7 @@ private string hostName()
 
 	version (Posix) {
 		import core.sys.posix.sys.utsname;
+		import core.sys.posix.unistd : gethostname;
 		utsname name;
 		if (uname(&name)) return hostName;
 		hostName = name.nodename.to!string();
@@ -742,8 +695,33 @@ private string hostName()
 		auto ih = new InternetHost;
 		if (!ih.getHostByName(hostName)) return hostName;
 		hostName = ih.name;
+
+		if (!hostName.length) {
+			char[256] buf;
+			if (gethostname(buf.ptr, cast(int) buf.length) == 0) {
+				ubyte len;
+				for (; len < buf.length && buf[len] != 0; len++) {}
+				hostName = buf[0 .. len].idup;
+			}
+		}
+	} else version (Windows) {
+		import core.sys.windows.winbase;
+		import core.sys.windows.winsock2 : gethostname;
+		wchar[512] buf;
+		uint size = cast(uint) buf.length;
+		if (GetComputerNameExW(COMPUTER_NAME_FORMAT.ComputerNamePhysicalDnsFullyQualified, buf.ptr, &size)) {
+			hostName = buf[0 .. size].to!string();
+		}
+
+		if (!hostName.length) {
+			char[256] name;
+			if (gethostname(name.ptr, cast(int) name.length) == 0) {
+				ubyte len;
+				for (; len < name.length && name[len] != 0; len++) {}
+				hostName = name[0 .. len].idup;
+			}
+		}
 	}
-	// TODO: determine proper host name on windows
 
 	return hostName;
 }
@@ -753,10 +731,7 @@ private {
 	shared(FileLogger) ss_stdoutLogger;
 }
 
-/**
-Returns a list of all registered loggers.
-*/
-shared(Logger)[] getLoggers() nothrow @trusted { return ss_loggers; }
+private shared(Logger)[] getLoggers() nothrow @trusted { return ss_loggers; }
 
 package void initializeLogModule()
 {
@@ -769,16 +744,12 @@ package void initializeLogModule()
 	} else enum disable_stdout = false;
 
 	static if (!disable_stdout) {
-		auto stdoutlogger = new FileLogger(stdout, stderr);
-		version (Posix) {
-			import core.sys.posix.unistd : isatty;
-			if (isatty(stdout.fileno))
-				stdoutlogger.useColors = true;
+		ss_stdoutLogger = cast(shared)new FileLogger(stdout, stderr);
+		{
+			auto l = ss_stdoutLogger.lock();
+			l.minLevel = LogLevel.info;
+			l.format = FileLogger.Format.plain;
 		}
-		stdoutlogger.minLevel = LogLevel.info;
-		stdoutlogger.format = FileLogger.Format.plain;
-		ss_stdoutLogger = cast(shared)stdoutlogger;
-
 		registerLogger(ss_stdoutLogger);
 
 		bool[4] verbose;
@@ -796,24 +767,7 @@ package void initializeLogModule()
 				setLogLevel(cast(LogLevel)(LogLevel.diagnostic - i));
 				break;
 			}
-
-		if (verbose[3]) setLogFormat(FileLogger.Format.threadTime, FileLogger.Format.threadTime);
 	}
-}
-
-private nothrow void doLog(S, T...)(LogLevel level, string mod, string func, string file, int line, S fmt, lazy T args)
-{
-	try {
-		auto args_copy = args;
-
-		foreach (l; getLoggers())
-			if (l.minLevel <= level) { // WARNING: TYPE SYSTEM HOLE: accessing field of shared class!
-				auto ll = l.lock();
-				auto rng = LogOutputRange(ll, file, line, level);
-				/*() @trusted {*/ rng.formattedWrite(fmt, args_copy); //} (); // formattedWrite is not @safe at least up to 2.068.0
-				rng.finalize();
-			}
-	} catch(Exception e) debug assert(false, e.msg);
 }
 
 private struct LogOutputRange {
@@ -834,7 +788,6 @@ private struct LogOutputRange {
 			this.info.level = level;
 			this.info.thread = () @trusted { return Thread.getThis(); }(); // not @safe as of 2.065
 			this.info.threadID = makeid(this.info.thread);
-			this.info.threadName = () @trusted { return this.info.thread ? this.info.thread.name : ""; } ();
 			this.info.fiber = () @trusted { return Fiber.getThis(); }(); // not @safe as of 2.065
 			this.info.fiberID = makeid(this.info.fiber);
 		} catch (Exception e) {
@@ -878,6 +831,7 @@ private struct LogOutputRange {
 	void put(dchar ch)
 	{
 		static import std.utf;
+
 		if (ch < 128) put(cast(char)ch);
 		else {
 			char[4] buf;

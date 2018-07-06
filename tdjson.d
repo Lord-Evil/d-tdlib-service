@@ -14,6 +14,8 @@ class TDClient
 private:
 	void * _client;
 	bool isAuthorized=false;
+	bool running=false;
+	Task loopTask;
 public:
 	this(){
 		_client = td_json_client_create();
@@ -30,14 +32,17 @@ public:
 		return fromStringz(td_json_client_execute(_client, toStringz(request)));
 	}
 	~this(){
+		writeln("killing telegram");
+		running=false;
 		td_json_client_destroy(_client);
 		exitEventLoop(true);
 	}
 
 	//extra methods
 	void loop(){
-		runTask({
-			while(true)
+		running=true;
+		loopTask=runTask({
+			while(running)
 			{
 				sleep(1.msecs);			
 				string event;

@@ -1,13 +1,14 @@
 /**
 	Generic connection pool for reusing persistent connections across fibers.
 
-	Copyright: © 2012-2016 RejectedSoftware e.K.
+	Copyright: © 2012 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
 module vibe.core.connectionpool;
 
 import vibe.core.log;
+import vibe.core.driver;
 
 import core.thread;
 import vibe.core.sync;
@@ -27,10 +28,11 @@ import vibe.internal.freelistref;
 	reopen it if necessary. The `ConnectionPool` class has no knowledge of the
 	internals of the connection objects.
 */
-final class ConnectionPool(Connection)
+class ConnectionPool(Connection)
 {
+	@safe:
 	private {
-		Connection delegate() @safe m_connectionFactory;
+		Connection delegate() m_connectionFactory;
 		Connection[] m_connections;
 		int[const(Connection)] m_lockCount;
 		FreeListRef!LocalTaskSemaphore m_sem;
@@ -44,7 +46,7 @@ final class ConnectionPool(Connection)
 		debug m_thread = () @trusted { return Thread.getThis(); } ();
 	}
 
-	deprecated("Use an @safe callback instead")
+	/// Scheduled for deprecation - use an `@safe` callback instead
 	this(Connection delegate() connection_factory, uint max_concurrent = uint.max)
 	@system {
 		this(cast(Connection delegate() @safe)connection_factory, max_concurrent);
@@ -70,10 +72,10 @@ final class ConnectionPool(Connection)
 		to determine when to unlock the connection.
 	*/
 	LockedConnection!Connection lockConnection()
-	@safe {
+	{
 		debug assert(m_thread is () @trusted { return Thread.getThis(); } (), "ConnectionPool was called from a foreign thread!");
 
-		() @trusted { m_sem.lock(); } ();
+		m_sem.lock();
 		size_t cidx = size_t.max;
 		foreach( i, c; m_connections ){
 			auto plc = c in m_lockCount;
@@ -90,8 +92,7 @@ final class ConnectionPool(Connection)
 		} else {
 			logDebug("creating new %s connection, all %d are in use", Connection.stringof, m_connections.length);
 			conn = m_connectionFactory(); // NOTE: may block
-			static if (is(typeof(cast(void*)conn)))
-				logDebug(" ... %s", () @trusted { return cast(void*)conn; } ());
+			logDebug(" ... %s", () @trusted { return cast(void*)conn; } ());
 		}
 		m_lockCount[conn] = 1;
 		if( cidx == size_t.max ){
@@ -103,44 +104,8 @@ final class ConnectionPool(Connection)
 	}
 }
 
-///
-unittest {
-	class Connection {
-		void write() {}
-	}
-
-	auto pool = new ConnectionPool!Connection({
-		return new Connection; // perform the connection here
-	});
-
-	// create and lock a first connection
-	auto c1 = pool.lockConnection();
-	c1.write();
-
-	// create and lock a second connection
-	auto c2 = pool.lockConnection();
-	c2.write();
-
-	// writing to c1 will still write to the first connection
-	c1.write();
-
-	// free up the reference to the first connection, so that it can be reused
-	destroy(c1);
-
-	// locking a new connection will reuse the first connection now instead of creating a new one
-	auto c3 = pool.lockConnection();
-	c3.write();
-}
-
-unittest { // issue vibe-d#2109
-	import vibe.core.net : TCPConnection, connectTCP;
-	new ConnectionPool!TCPConnection({ return connectTCP("127.0.0.1", 8080); });
-}
-
-
 struct LockedConnection(Connection) {
-	import vibe.core.task : Task;
-
+	@safe:
 	private {
 		ConnectionPool!Connection m_pool;
 		Task m_task;
@@ -148,11 +113,9 @@ struct LockedConnection(Connection) {
 		debug uint m_magic = 0xB1345AC2;
 	}
 
-	@safe:
-
 	private this(ConnectionPool!Connection pool, Connection conn)
 	{
-		assert(!!conn);
+		assert(conn !is null);
 		m_pool = pool;
 		m_conn = conn;
 		m_task = Task.getThis();
@@ -161,19 +124,18 @@ struct LockedConnection(Connection) {
 	this(this)
 	{
 		debug assert(m_magic == 0xB1345AC2, "LockedConnection value corrupted.");
-		if (!!m_conn) {
+		if( m_conn ){
 			auto fthis = Task.getThis();
 			assert(fthis is m_task);
 			m_pool.m_lockCount[m_conn]++;
-			static if (is(typeof(cast(void*)conn)))
-				logTrace("conn %s copy %d", () @trusted { return cast(void*)m_conn; } (), m_pool.m_lockCount[m_conn]);
+			logTrace("conn %s copy %d", () @trusted { return cast(void*)m_conn; } (), m_pool.m_lockCount[m_conn]);
 		}
 	}
 
 	~this()
 	{
 		debug assert(m_magic == 0xB1345AC2, "LockedConnection value corrupted.");
-		if (!!m_conn) {
+		if( m_conn ){
 			auto fthis = Task.getThis();
 			assert(fthis is m_task, "Locked connection destroyed in foreign task.");
 			auto plc = m_conn in m_pool.m_lockCount;
@@ -184,7 +146,7 @@ struct LockedConnection(Connection) {
 				() @trusted { m_pool.m_sem.unlock(); } ();
 				//logTrace("conn %s release", cast(void*)m_conn);
 			}
-			m_conn = Connection.init;
+			m_conn = null;
 		}
 	}
 
