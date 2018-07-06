@@ -44,7 +44,8 @@ public:
 		loopTask=runTask({
 			while(running)
 			{
-				sleep(1.msecs);			
+				sleep(1.msecs);
+				if(!running)break;		
 				string event;
 				try
 				{

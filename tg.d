@@ -15,7 +15,7 @@ void shutDown(int i){
 	writeln("\nSignal caught! "~i.to!string~"\nShutting down!");
 	sleep(1.msecs);
 	client.destroy();
-	sleep(500.msecs);
+	sleep(1.msecs);
 }
 
 void errorHandler(string message){
