@@ -14,17 +14,19 @@ void test(){
 }
 
 void main(){
-	/*
-	auto t = runTask(toDelegate(&test));
+	
+/*	auto t = runTask(toDelegate(&test));
+	auto t2 = runTask({writeln(2);});
 	writeln("Main");
 	t.join();
-	*/
+	t2.join();
+	return;*/
 
 	TDLog.setPath("tg.log");
 	TDLog.setCallback(&errorHandler);
 	TDLog.setLevel(2);
 
 	TDClient client=new TDClient();
-	client.loop();
-
+	auto loop = runTask(&client.loop);
+	loop.join();
 }
