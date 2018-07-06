@@ -32,10 +32,8 @@ public:
 		return fromStringz(td_json_client_execute(_client, toStringz(request)));
 	}
 	~this(){
-		writeln("killing telegram");
 		running=false;
 		td_json_client_destroy(_client);
-		exitEventLoop(true);
 	}
 
 	//extra methods
