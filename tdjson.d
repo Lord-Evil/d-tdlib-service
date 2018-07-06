@@ -4,6 +4,10 @@ import std.json;
 import std.stdio;
 import std.conv: to;
 import std.file;
+import core.time;
+
+import vibe.core.core;
+import vibe.core.log;
 
 class TDClient
 {
@@ -27,27 +31,37 @@ public:
 	}
 	~this(){
 		td_json_client_destroy(_client);
+		exitEventLoop(true);
 	}
 
 	//extra methods
 	void loop(){
-		while(true)
-		{
-			string event;
-			try
+		runTask({
+			while(true)
 			{
-				event=receive();
-				if(event==null){
-					//writeln("NOTHING");
-				}else{
-					processEvent(event);
+				sleep(1.msecs);			
+				string event;
+				try
+				{
+					event=receive();
+					if(event==null||event.length==0){
+						//writeln("NOTHING");
+					}else{
+						if(isAuthorized){
+							runTask({
+								processEvent(event);
+							});
+						}
+						else
+							processEvent(event);
+					}
+				}catch(Throwable ex){
+					writeln("--------ERROR------");
+					writeln(event);
+					writeln(ex);
 				}
-			}catch(Throwable ex){
-				writeln("--------ERROR------");
-				writeln(event);
-				writeln(ex);
 			}
-		}
+		});
 	}
 	void processEvent(string event){
 		JSONValue ev = parseJSON(event);
@@ -92,7 +106,7 @@ public:
 				break;
 
 			default:
-				//writeln(event);
+				writeln(event);
 				break;
 		}
 	}
