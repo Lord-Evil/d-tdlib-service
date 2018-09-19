@@ -1,0 +1,9 @@
+name "telegram-d"
+description "tdlib client service"
+authors "Evil Satanson"
+copyright "Copyright © 2018, Evil Satanson"
+license "GPL3"
+
+dependency "vibe-d:http" version="*"
+libs "tdjson" "ssl" "crypto"
+lflags "-L./lib" "-rpath=./lib" "-s" "-O3"
